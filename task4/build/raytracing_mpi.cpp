@@ -1,4 +1,3 @@
-
 #include "minirt/minirt.h"
 
 #include <mpi.h>
@@ -46,14 +45,13 @@ void initScene(Scene &scene) {
 }
 
 int main(int argc, char **argv) {
-
+    
     MPI_Init(&argc, &argv);
-
+    
     int viewPlaneResolutionX = (argc > 1 ? stoi(argv[1]) : 600);
     int viewPlaneResolutionY = (argc > 2 ? stoi(argv[2]) : 600);
     int numOfSamples = (argc > 3 ? stoi(argv[3]) : 1);
-    int numOfFrames = (argc > 4 ? stoi(argv[4]) : 1);
-    string sceneFile = (argc > 5 ? argv[5] : "");
+    string sceneFile = (argc > 4 ? argv[4] : "");
 
     Scene scene;
     if (sceneFile.empty()) {
@@ -72,59 +70,90 @@ int main(int argc, char **argv) {
 
     ViewPlane viewPlane {viewPlaneResolutionX, viewPlaneResolutionY,
                          viewPlaneSizeX, viewPlaneSizeY, viewPlaneDistance};
-
+                         
     int rank, size;
-
+    
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
-
-    int mySizeX = viewPlaneResolutionX / size;
-    if (rank == (size - 1)) {
-	mySizeX = mySizeX + (viewPlaneResolutionX % size);
-    }
+    
+    // TODO: partition the image onto pieces (blocks).
+    // Each process should compute a different piece of the image.
+    // You should correctly compute the size of the piece for each process.
+    // Generally, your program should work correctly for any image size and number of processes. 
+    int mySizeX = viewPlaneResolutionX;
     int mySizeY = viewPlaneResolutionY;
-
-
-    Image myPiece(mySizeX, mySizeY);
-
+    int block_size = mySizeY/size;
+    int block_start = rank * block_size;
+ 
+    // Each process stores its piece only.
+    Image myPiece(mySizeX,  block_size);
+    
     double ts = MPI_Wtime();
-
+    // TODO: make each process to use correct pixel indices in computePixel for its piece.
+    // Hint: for that you need to know where its piece is located in the image (an offset from the (0,0) global index).
     for(int x = 0; x < mySizeX; x++)
-    for(int y = 0; y < mySizeY; y++) {
-        const auto color = viewPlane.computePixel(scene, x + (rank * mySizeX), y, numOfSamples);
+    for(int y = 0; y < block_size; y++) {
+        const auto color = viewPlane.computePixel(scene, x, y + block_start, numOfSamples);
         myPiece.set(x, y, color);
     }
     double te = MPI_Wtime();
-
+    
     double time = te - ts;
-    cout << "Time = " << time << endl;
-
-    MPI_Request send_request;
-    MPI_Isend(myPiece.getData(), mySizeX * mySizeY * 3, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD, &send_request);
+    
+    // TODO: compute the maximum time from all processes using MPI_Reduce and output it only once.
+//    cout << rank <<". Time = " << time << endl;
 
     double max_time;
-    MPI_Reduce(&time, &max_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
-    if (rank == 0) {
-	printf("Max Execution Time = %.5f\n", max_time);
-    }
 
+	MPI_Reduce(&time, &max_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
 
+	if (rank == 0) {
+		printf("Max time = %.5f\n", max_time);
+        //will add this
+        PrePrallelWork();
+	}
+    //add this
+    ParallelWork();
+
+    // We are sending computed piece to the main (0) process as array of doubles.
+    // Each pixel is stored as 3 double values: red, green, blue.
+    // Image stores its pixels as a single block in memory.
+    MPI_Request send_request;
+    MPI_Isend(myPiece.getData(), mySizeX * block_size * 3, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD, &send_request);
+
+    // The main process will gather the final (resulting) image.
     if (rank == 0) {
+        // This will be the final image.
         Image finalImage(viewPlaneResolutionX, viewPlaneResolutionY);
-
+        
         for (int src_rank = 0; src_rank < size; src_rank++) {
-            int srcSizeX = viewPlaneResolutionX / size;
-	    int restRowsX = (src_rank == (size - 1)) ? (viewPlaneResolutionX % size) : 0;
-            int srcSizeY = mySizeY;
-            Image srcPiece(srcSizeX + restRowsX, srcSizeY);
-            MPI_Recv(srcPiece.getData(), (srcSizeX+restRowsX) * srcSizeY * 3, MPI_DOUBLE, src_rank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-	    for (int x = 0; x < srcSizeX + restRowsX; x++)
-	    for (int y = 0; y < viewPlaneResolutionY; y++) {
-		finalImage.set(x + (src_rank * srcSizeX), y, srcPiece.get(x, y));
-	    }
+            // TODO: in general case src_rank's piece size can be different from our (rank 0) piece size.
+            // Think how to handle this correctly.
+            int srcSizeX = mySizeX;
+            int srcSizeY = mySizeY/size;
+            int block_start = src_rank * srcSizeY;
+
+            // Allocating temporary space to receive an image piece from src_rank process.
+            Image srcPiece(srcSizeX, srcSizeY);
+            // Receiving a piece.
+            MPI_Recv(srcPiece.getData(), srcSizeX * srcSizeY * 3, MPI_DOUBLE, src_rank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            // TODO: copy the received piece into the correct place in the final image.
+            // Hint: by knowing a rank of sending process (src_rank) and how pieces are distributed, 
+            // you can compute the correct location for its piece.
+            // Use Image::get(x, y) method to access pixels of the image.
+            // Use Image::set(x, y, color) method to set pixels of the image.
+            for(int x = 0; x < mySizeX; x++)
+                for(int y = 0; y < srcSizeY; y++) {
+                    finalImage.set(x, y+(block_start), srcPiece.get(x, y));
+                }
+
+                //add this
+                PostParallelWork();
         }
         finalImage.saveJPEG("raytracing_" + to_string(size) + ".jpg");
     }
+    
+    // Finishing send operation.
     MPI_Wait(&send_request, MPI_STATUS_IGNORE);
 
     MPI_Finalize();
